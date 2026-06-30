@@ -317,7 +317,7 @@ jobs:
           cd "${TMP_DIR}"
           # Download the official release tarball
           curl -fsSL -o trivy.tgz \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+           "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_linux-64bit.tar.gz"
           tar -xzf trivy.tgz
           sudo install -m 0755 trivy /usr/local/bin/trivy
           cd -
