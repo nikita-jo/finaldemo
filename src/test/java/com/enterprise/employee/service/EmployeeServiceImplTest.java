@@ -109,7 +109,6 @@ class EmployeeServiceImplTest {
     @DisplayName("getAllEmployees - null from repository returns empty list")
     void getAllEmployees_nullFromRepository() {
         when(employeeRepository.findAll()).thenReturn(null);
-        when(employeeMapper.toDTOList(null)).thenReturn(Collections.emptyList());
 
         List<EmployeeDTO> result = employeeService.getAllEmployees();
 
