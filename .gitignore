@@ -23,6 +23,7 @@ reports/
 !reports/security-fix-summary.md
 !reports/patched-files.md
 !reports/fix-log.md
+!reports/trivy-report.md
 !reports/.gitkeep
 .mvn/wrapper/maven-wrapper.jar
 trivy-report.json
