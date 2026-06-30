@@ -36,6 +36,10 @@ public class EmployeeServiceImpl implements EmployeeService {
     public List<EmployeeDTO> getAllEmployees() {
         log.debug("Fetching all employees");
         List<Employee> employees = employeeRepository.findAll();
+        if (employees == null) {
+            log.warn("Repository returned null employee list; returning empty list");
+            return List.of();
+        }
         log.info("Retrieved {} employees", employees.size());
         return employeeMapper.toDTOList(employees);
     }

@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -310,13 +311,16 @@ class EmployeeServiceImplTest {
     }
 
     @Test
-    @DisplayName("createEmployee - null DTO throws NullPointerException at mapper")
+    @DisplayName("createEmployee - null DTO throws at the existsByEmployeeId guard")
     void createEmployee_nullDTO() {
-        when(employeeRepository.existsByEmployeeId(anyString())).thenReturn(false);
-        when(employeeMapper.toEntity(null)).thenReturn(null);
+        // Use lenient to avoid UnnecessaryStubbingException; stubs are belt-and-suspenders
+        // for any future reordering of the service guard.
+        lenient().when(employeeRepository.existsByEmployeeId(anyString())).thenReturn(false);
+        lenient().when(employeeMapper.toEntity(null)).thenReturn(null);
 
-        // toEntity returns null then save(null) would throw — we assert it throws
+        // Service first checks existsByEmployeeId on the DTO's employeeId, then maps.
+        // A null DTO triggers NPE before reaching the mapper, so we assert an NPE.
         assertThatThrownBy(() -> employeeService.createEmployee(null))
-                .isInstanceOfAny(NullPointerException.class, IllegalArgumentException.class);
+                .isInstanceOf(NullPointerException.class);
     }
 }

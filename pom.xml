@@ -122,24 +122,15 @@
                             <goal>prepare-agent</goal>
                         </goals>
                     </execution>
+                    <!-- HTML report -->
                     <execution>
-                        <id>report</id>
+                        <id>report-html</id>
                         <phase>test</phase>
                         <goals>
                             <goal>report</goal>
                         </goals>
                     </execution>
-                    <execution>
-                        <id>report-csv</id>
-                        <phase>test</phase>
-                        <goals>
-                            <goal>report</goal>
-                        </goals>
-                        <configuration>
-                            <format>csv</format>
-                            <outputDirectory>${project.build.directory}/site/jacoco</outputDirectory>
-                        </configuration>
-                    </execution>
+                    <!-- XML report -->
                     <execution>
                         <id>report-xml</id>
                         <phase>test</phase>
@@ -147,8 +138,19 @@
                             <goal>report</goal>
                         </goals>
                         <configuration>
-                            <format>xml</format>
                             <outputDirectory>${project.build.directory}/site/jacoco</outputDirectory>
+                        </configuration>
+                    </execution>
+                    <!-- CSV report -->
+                    <execution>
+                        <id>report-csv</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/site/jacoco</outputDirectory>
+                            <outputFormat>csv</outputFormat>
                         </configuration>
                     </execution>
                 </executions>
