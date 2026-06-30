@@ -189,35 +189,40 @@ jobs:
       - name: 1. Checkout repository
         uses: actions/checkout@v4
 
-      # trivy-action@v0.30.0 internally calls setup-trivy@v0.2.2, which was never
-      # published. We skip that internal call and pin setup-trivy ourselves to a
-      # tag that exists (v0.3.1).
+      # trivy-action@v0.30.0 internally calls setup-trivy@v0.2.2, which was
+      # never published. Even with skip-setup-trivy: true, GitHub Actions still
+      # resolves the action reference at planning time, so we install the Trivy
+      # CLI directly via apt and run it ourselves.
       - name: 2. Install Trivy
-        uses: aquasecurity/setup-trivy@v0.3.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+          trivy --version
 
       - name: 3. Trivy Filesystem Scan
-        uses: aquasecurity/trivy-action@v0.30.0
-        with:
-          skip-setup-trivy: true
-          scan-type: fs
-          scan-ref: .
-          format: json
-          output: trivy-report.json
-          severity: CRITICAL,HIGH,MEDIUM,LOW
-          ignore-unfixed: true
+        run: |
+          trivy fs \
+            --format json \
+            --output trivy-report.json \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            --ignore-unfixed \
+            .
         continue-on-error: true
 
       - name: 4. Trivy Image Scan (best effort)
-        uses: aquasecurity/trivy-action@v0.30.0
-        with:
-          skip-setup-trivy: true
-          image-ref: eclipse-temurin:21-jre-jammy
-          format: json
-          output: trivy-image-report.json
-          severity: CRITICAL,HIGH
+        run: |
+          trivy image \
+            --format json \
+            --output trivy-image-report.json \
+            --severity CRITICAL,HIGH \
+            eclipse-temurin:21-jre-jammy
         continue-on-error: true
 
-      - name: 4. Trivy gate (no Critical / High)
+      - name: 5. Trivy gate (no Critical / High)
         run: |
           if [ -f trivy-report.json ]; then
             CRIT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-report.json 2>/dev/null || echo 0)
@@ -234,7 +239,7 @@ jobs:
             exit 1
           fi
 
-      - name: 5. Upload Trivy reports
+      - name: 6. Upload Trivy reports
         uses: actions/upload-artifact@v4
         with:
           name: trivy-reports
