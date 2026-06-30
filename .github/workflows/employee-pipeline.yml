@@ -244,7 +244,186 @@ jobs:
           else
             echo "::notice::No Critical or High vulnerabilities"
           fi
-      - name: 6. Upload Trivy reports
+      - name: 6. Build trivy-report.md from scan JSON
+        id: build-md-report
+        # Best-effort: if either JSON is missing (image scan disabled, rate
+        # limit, etc.) the count helpers degrade gracefully to 0 so the step
+        # still produces a partial report rather than failing the whole job.
+        if: always()
+        run: |
+          set -euo pipefail
+          FS_JSON="trivy-report.json"
+          IMG_JSON="trivy-image-report.json"
+          TODAY="$(date -u +%Y-%m-%d)"
+          COMMIT_SHORT="${GITHUB_SHA::7}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Count vulnerabilities of a given severity in a Trivy JSON report.
+          # Trivy JSON shape: { Results: [ { Vulnerabilities: [ { Severity, FixedVersion, Status } ] } ] }
+          count_severity() {
+            local file="$1"; local sev="$2"
+            [ -f "$file" ] || { echo 0; return; }
+            jq -r --arg s "$sev" '
+              [ (.Results // [])[]
+                | (.Vulnerabilities // [])
+                | .[]?
+                | select(.Severity == $s)
+              ] | length
+            ' "$file" 2>/dev/null || echo 0
+          }
+
+          fixed_unfixed() {
+            local file="$1"; local sev="$2"
+            [ -f "$file" ] || { echo "0|0"; return; }
+            jq -r --arg s "$sev" '
+              [ (.Results // [])[]
+                | (.Vulnerabilities // [])
+                | .[]?
+                | select(.Severity == $s)
+                | { fixed: (if .Status == null or .Status == "fixed" or .FixedVersion != null then 1 else 0 end) }
+              ]
+              | (map(select(.fixed == 1)) | length) as $f
+              | (length - $f) as $u
+              | "\($f)|\($u)"
+            ' "$file" 2>/dev/null || echo "0|0"
+          }
+
+          # ---------- filesystem counts ----------
+          FS_CRIT=$(count_severity "$FS_JSON" "CRITICAL")
+          FS_HIGH=$(count_severity "$FS_JSON" "HIGH")
+          FS_MED=$(count_severity  "$FS_JSON" "MEDIUM")
+          FS_LOW=$(count_severity  "$FS_JSON" "LOW")
+          FS_UNK=$(count_severity  "$FS_JSON" "UNKNOWN")
+          FS_TOT=$((FS_CRIT + FS_HIGH + FS_MED + FS_LOW + FS_UNK))
+
+          # ---------- image counts ----------
+          IMG_CRIT=$(count_severity "$IMG_JSON" "CRITICAL")
+          IMG_HIGH=$(count_severity "$IMG_JSON" "HIGH")
+          IMG_MED=$(count_severity  "$IMG_JSON" "MEDIUM")
+          IMG_LOW=$(count_severity  "$IMG_JSON" "LOW")
+          IMG_UNK=$(count_severity  "$IMG_JSON" "UNKNOWN")
+          IMG_TOT=$((IMG_CRIT + IMG_HIGH + IMG_MED + IMG_LOW + IMG_UNK))
+
+          # ---------- fixed/unfixed (image) ----------
+          IFS='|' read -r IMG_FIXED_CRIT IMG_UNFIXED_CRIT <<< "$(fixed_unfixed "$IMG_JSON" "CRITICAL")"
+          IFS='|' read -r IMG_FIXED_HIGH  IMG_UNFIXED_HIGH  <<< "$(fixed_unfixed "$IMG_JSON" "HIGH")"
+          IFS='|' read -r IMG_FIXED_MED   IMG_UNFIXED_MED   <<< "$(fixed_unfixed "$IMG_JSON" "MEDIUM")"
+          IFS='|' read -r IMG_FIXED_LOW   IMG_UNFIXED_LOW   <<< "$(fixed_unfixed "$IMG_JSON" "LOW")"
+
+          # ---------- status: reuse the gate from step 5 ----------
+          if [ "$FS_CRIT" -gt 0 ] || [ "$FS_HIGH" -gt 0 ] || [ "$IMG_CRIT" -gt 0 ] || [ "$IMG_HIGH" -gt 0 ]; then
+            STATUS="❌ Fail — CRITICAL or HIGH vulnerabilities detected"
+          else
+            STATUS="✅ Pass — no CRITICAL or HIGH findings"
+          fi
+
+          # ---------- write markdown report ----------
+          OUT="trivy-report.md"
+          cat > "$OUT" <<EOF
+          # Trivy Vulnerability Scan Report
+
+          ## Scan Information
+
+          | Field | Value |
+          |---|---|
+          | **Scanner** | Trivy (CLI) |
+          | **Scan Date** | ${TODAY} |
+          | **Run** | [#${GITHUB_RUN_NUMBER}](${RUN_URL}) |
+          | **Commit** | \`${COMMIT_SHORT}\` |
+          | **Triggered By** | ${{ github.event_name }} |
+          | **Pipeline** | employee-pipeline.yml › trivy-scan |
+
+          > Generated automatically from \`trivy-report.json\` (filesystem) and
+          > \`trivy-image-report.json\` (image). The image scan targets
+          > \`eclipse-temurin:21-jre-jammy\` because the application image is
+          > only built in \`trivy-scan.yml\`, not this pipeline.
+
+          ---
+
+          ## Summary by Severity
+
+          | Severity | Total | Fixed | Unfixed |
+          |---|---|---|---|
+          | 🔴 **CRITICAL** | $((FS_CRIT + IMG_CRIT)) | ${IMG_FIXED_CRIT} | ${IMG_UNFIXED_CRIT} |
+          | 🟠 **HIGH**     | $((FS_HIGH + IMG_HIGH)) | ${IMG_FIXED_HIGH} | ${IMG_UNFIXED_HIGH} |
+          | 🟡 **MEDIUM**   | $((FS_MED + IMG_MED))   | ${IMG_FIXED_MED}  | ${IMG_UNFIXED_MED}  |
+          | 🔵 **LOW**      | $((FS_LOW + IMG_LOW))   | ${IMG_FIXED_LOW}  | ${IMG_UNFIXED_LOW}  |
+          | ⚪ **UNKNOWN**  | $((FS_UNK + IMG_UNK))   | — | — |
+          | **TOTAL**       | **$((FS_TOT + IMG_TOT))** | — | — |
+
+          ## Summary by Target
+
+          | Target | CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN |
+          |---|---|---|---|---|---|
+          | Filesystem (source + configs)   | ${FS_CRIT} | ${FS_HIGH} | ${FS_MED} | ${FS_LOW} | ${FS_UNK} |
+          | Docker base image (\`eclipse-temurin:21-jre-jammy\`) | ${IMG_CRIT} | ${IMG_HIGH} | ${IMG_MED} | ${IMG_LOW} | ${IMG_UNK} |
+
+          > _Fixed/Unfixed counts apply to the image target only — Trivy's
+          > filesystem scan against source code typically doesn't emit fix
+          > status._
+
+          ---
+
+          _Detailed per-CVE tables and full findings are available in the
+          workflow artifacts:_
+          - \`trivy-reports/trivy-report.json\` (filesystem, machine-readable)
+          - \`trivy-reports/trivy-image-report.json\` (image, machine-readable)
+
+          ---
+
+          **Status:** ${STATUS}
+          EOF
+
+          echo "report_path=${OUT}" >> "$GITHUB_OUTPUT"
+          echo "Generated ${OUT}:"
+          cat "${OUT}"
+
+      - name: 7. Upload markdown report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-md
+          path: trivy-report.md
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: 8. Commit report back to repo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p reports
+          cp trivy-report.md reports/trivy-report.md
+          git add reports/trivy-report.md
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(security): update Trivy report [skip ci]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: 9. Comment on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('trivy-report.md')) {
+              console.log('trivy-report.md not found - skipping PR comment');
+              return;
+            }
+            const report = fs.readFileSync('trivy-report.md', 'utf8');
+            const truncated = report.length > 60000
+              ? report.slice(0, 60000) + '\n\n_…report truncated; see workflow artifacts for full output._'
+              : report;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: truncated
+            });
+
+      - name: 10. Upload Trivy reports
         uses: actions/upload-artifact@v4
         with:
           name: trivy-reports
