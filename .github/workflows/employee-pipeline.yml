@@ -189,9 +189,16 @@ jobs:
       - name: 1. Checkout repository
         uses: actions/checkout@v4
 
-      - name: 2. Trivy Filesystem Scan
+      # trivy-action@v0.30.0 internally calls setup-trivy@v0.2.2, which was never
+      # published. We skip that internal call and pin setup-trivy ourselves to a
+      # tag that exists (v0.3.1).
+      - name: 2. Install Trivy
+        uses: aquasecurity/setup-trivy@v0.3.1
+
+      - name: 3. Trivy Filesystem Scan
         uses: aquasecurity/trivy-action@v0.30.0
         with:
+          skip-setup-trivy: true
           scan-type: fs
           scan-ref: .
           format: json
@@ -200,9 +207,10 @@ jobs:
           ignore-unfixed: true
         continue-on-error: true
 
-      - name: 3. Trivy Image Scan (best effort)
+      - name: 4. Trivy Image Scan (best effort)
         uses: aquasecurity/trivy-action@v0.30.0
         with:
+          skip-setup-trivy: true
           image-ref: eclipse-temurin:21-jre-jammy
           format: json
           output: trivy-image-report.json
