@@ -226,203 +226,29 @@ jobs:
         continue-on-error: true
 
       - name: 5. Trivy gate (no Critical / High)
-        id: initial-gate
-        # Best-effort gate. This step no longer fails the job on its own — it
-        # only records the outcome. Step 11 (auto-remediate loop) reads the
-        # CRIT/HIGH counts from the JSON files (not from this step's exit
-        # code) and step 16 is the authoritative final gate.
-        if: always()
+        # Best-effort gate: if the FS scan produced a report, fail on
+        # Critical/High findings. If no report exists (e.g. Trivy bailed on a
+        # rate limit before writing one), warn instead of failing — the image
+        # scan and CodeQL/NVIDIA agents still cover the dependency surface.
         run: |
           if [ ! -f trivy-report.json ]; then
             echo "::warning::Trivy filesystem report not produced - skipping gate"
-            echo "initial_gate=skip"  >> "$GITHUB_OUTPUT"
             exit 0
           fi
           CRIT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-report.json 2>/dev/null || echo 0)
           HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-report.json 2>/dev/null || echo 0)
           echo "Critical=$CRIT High=$HIGH"
           if [ "$CRIT" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
-            echo "::error::Critical=$CRIT, High=$HIGH vulnerabilities present (initial scan, before remediation)"
-            echo "initial_gate=red" >> "$GITHUB_OUTPUT"
-            # Do not exit 1 — the remediation loop will get a chance to fix it.
-            exit 0
+            echo "::error::Critical=$CRIT, High=$HIGH vulnerabilities present"
+            exit 1
           else
-            echo "::notice::No Critical or High vulnerabilities (initial scan)"
-            echo "initial_gate=green" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Critical or High vulnerabilities"
           fi
-      - name: 6. Upload Trivy reports (pre-remediation JSONs)
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-reports-initial
-          path: |
-            trivy-report.json
-            trivy-image-report.json
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: 7. Auto-remediate loop (LLM patch + re-scan, up to 2 retries)
-        id: remediate
-        if: always()
-        env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-        run: |
-          set -euo pipefail
-
-          WORK="${RUNNER_TEMP}/remediation"
-          mkdir -p "${WORK}"
-          # Copy the working tree into a scratch dir. We patch in place here
-          # so the next Trivy run sees the post-patch files. The original
-          # checkout is left untouched. tar is universally available; rsync
-          # is not on the GitHub-hosted runner by default.
-          tar --exclude='./target' --exclude='./.git' --exclude='./node_modules' \
-              --exclude='./.m2'    --exclude='./.mvn'                  \
-              -cf - . | (cd "${WORK}" && tar -xf -)
-
-          count_severity() {
-            local file="$1"; local sev="$2"
-            [ -f "$file" ] || { echo 0; return; }
-            jq -r --arg s "$sev" '
-              [ (.Results // [])[]
-                | (.Vulnerabilities // [])
-                | .[]?
-                | select(.Severity == $s)
-              ] | length
-            ' "$file" 2>/dev/null || echo 0
-          }
-
-          gate_red() {
-            # Look at BOTH the filesystem and image JSONs. The loop should
-            # keep retrying if either has CRITICAL or HIGH findings.
-            local label="$1"
-            local fs_crit fs_high img_crit img_high
-            fs_crit=$(count_severity  "${label}-trivy-report.json"       "CRITICAL")
-            fs_high=$(count_severity  "${label}-trivy-report.json"       "HIGH")
-            img_crit=$(count_severity "${label}-trivy-image-report.json" "CRITICAL")
-            img_high=$(count_severity "${label}-trivy-image-report.json" "HIGH")
-            [ "$fs_crit" -gt 0 ] || [ "$fs_high" -gt 0 ] || [ "$img_crit" -gt 0 ] || [ "$img_high" -gt 0 ]
-          }
-
-          # Use the JSONs the job already produced as iteration 0.
-          cp trivy-report.json      "${WORK}/iter0-trivy-report.json"
-          cp trivy-image-report.json "${WORK}/iter0-trivy-image-report.json"
-
-          ITER=0
-          MAX_RETRIES=2
-          PATCH_EXIT=0
-          PATCH_LOG="[]"
-
-          # Iteration 0 is the scan we already ran. Iterate 1..MAX_RETRIES to
-          # patch + re-scan, up to the budget. We re-scan both the filesystem
-          # AND the image because a version bump in pom.xml can also pull in
-          # a new base-image tag.
-          for ITER in $(seq 1 "${MAX_RETRIES}"); do
-            echo "::group::Remediation iteration ${ITER}/${MAX_RETRIES}"
-            echo "Attempting auto-patch for CRITICAL/HIGH findings..."
-
-            PREV=$((ITER - 1))
-            if gate_red "${WORK}/iter${PREV}"; then
-              echo "Gate is RED before iteration ${ITER}. Generating patch."
-            else
-              echo "Gate is already GREEN. No patch needed."
-              break
-            fi
-
-            # Generate patch via LLM, apply in place in $WORK.
-            set +e
-            python3 scripts/auto-patch.py \
-              --repo-root   "${WORK}" \
-              --trivy       "${WORK}/iter${PREV}-trivy-report.json" \
-              --trivy-image "${WORK}/iter${PREV}-trivy-image-report.json" \
-              --pom         "${WORK}/pom.xml" \
-              --dockerfile  "${WORK}/Dockerfile" \
-              --config      "${WORK}/src/main/resources/application.yml" \
-              --output      "${WORK}/iter${ITER}-patch-log.json"
-            PATCH_EXIT=$?
-            set -e
-
-            case "${PATCH_EXIT}" in
-              0) echo "Patch applied successfully." ;;
-              4) echo "LLM returned no patches. Vulnerabilities are not in editable files. Giving up."
-                 break ;;
-              *) echo "::warning::Patch failed (exit ${PATCH_EXIT}). Will not retry if budget exhausted."
-                 PATCH_LOG=$(cat "${WORK}/iter${ITER}-patch-log.json" 2>/dev/null || echo '[]')
-                 break ;;
-            esac
-
-            PATCH_LOG=$(cat "${WORK}/iter${ITER}-patch-log.json")
-
-            # Re-scan filesystem and image in the patched tree. Both are
-            # best-effort: a bad patch could leave the tree in a state where
-            # Trivy errors out (invalid XML, missing files, etc.). We capture
-            # the exit code, log it, and treat the result as "no findings"
-            # so the loop terminates naturally rather than aborting.
-            echo "Re-running filesystem scan in patched tree..."
-            set +e
-            ( cd "${WORK}" && \
-              trivy fs \
-                --format json \
-                --output "iter${ITER}-trivy-report.json" \
-                --severity CRITICAL,HIGH,MEDIUM,LOW \
-                --ignore-unfixed \
-                --scanners vuln,secret \
-                . )
-            FS_EXIT=$?
-            set -e
-            if [ "$FS_EXIT" -ne 0 ] || [ ! -s "${WORK}/iter${ITER}-trivy-report.json" ]; then
-              echo "::warning::Trivy fs failed after patch (exit ${FS_EXIT}). Treating as 0 findings."
-              echo '{"Results":[]}' > "${WORK}/iter${ITER}-trivy-report.json"
-            fi
-
-            echo "Re-running image scan against eclipse-temurin:21-jre-jammy..."
-            set +e
-            ( cd "${WORK}" && \
-              trivy image \
-                --format json \
-                --output "iter${ITER}-trivy-image-report.json" \
-                --severity CRITICAL,HIGH \
-                eclipse-temurin:21-jre-jammy )
-            IMG_EXIT=$?
-            set -e
-            if [ "$IMG_EXIT" -ne 0 ] || [ ! -s "${WORK}/iter${ITER}-trivy-image-report.json" ]; then
-              echo "::warning::Trivy image failed after patch (exit ${IMG_EXIT}). Treating as 0 findings."
-              echo '{"Results":[]}' > "${WORK}/iter${ITER}-trivy-image-report.json"
-            fi
-
-            if ! gate_red "${WORK}/iter${ITER}"; then
-              echo "Gate is now GREEN after iteration ${ITER}."
-              break
-            fi
-            echo "Gate is still RED after iteration ${ITER}."
-            echo "::endgroup"
-          done
-
-          # Pick the last iteration's JSONs as the canonical scan output.
-          LAST=${ITER}
-          cp "${WORK}/iter${LAST}-trivy-report.json"       trivy-report.json
-          cp "${WORK}/iter${LAST}-trivy-image-report.json" trivy-image-report.json
-
-          # If we actually patched anything, mirror the patched files back to
-          # the working tree so the commit step can pick them up.
-          if [ "${PATCH_EXIT}" -eq 0 ] && [ "${LAST}" -ge 1 ]; then
-            echo "Mirroring patched files back to the working tree."
-            cp "${WORK}/pom.xml"                                  pom.xml
-            cp "${WORK}/Dockerfile"                               Dockerfile
-            cp "${WORK}/src/main/resources/application.yml"      src/main/resources/application.yml
-          fi
-
-          cp "${PATCH_LOG}" remediation-log.json
-
-          # Final gate signal for step 14.
-          if gate_red "${WORK}/iter${LAST}"; then
-            echo "remediation_status=fail"   >> "$GITHUB_OUTPUT"
-            echo "remediation_iter=${LAST}"  >> "$GITHUB_OUTPUT"
-          else
-            echo "remediation_status=pass"   >> "$GITHUB_OUTPUT"
-            echo "remediation_iter=${LAST}"  >> "$GITHUB_OUTPUT"
-          fi
-          echo "::endgroup"
-
-      - name: 12. Rebuild trivy-report.md from the (possibly remediated) JSON
+      - name: 6. Build trivy-report.md from scan JSON
+        id: build-md-report
+        # Best-effort: if either JSON is missing (image scan disabled, rate
+        # limit, etc.) the count helpers degrade gracefully to 0 so the step
+        # still produces a partial report rather than failing the whole job.
         if: always()
         run: |
           set -euo pipefail
@@ -431,9 +257,8 @@ jobs:
           TODAY="$(date -u +%Y-%m-%d)"
           COMMIT_SHORT="${GITHUB_SHA::7}"
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          ITER_LABEL="${{ steps.remediate.outputs.remediation_iter }}"
-          REMED_STATUS="${{ steps.remediate.outputs.remediation_status }}"
-
+          # Count vulnerabilities of a given severity in a Trivy JSON report.
+          # Trivy JSON shape: { Results: [ { Vulnerabilities: [ { Severity, FixedVersion, Status } ] } ] }
           count_severity() {
             local file="$1"; local sev="$2"
             [ -f "$file" ] || { echo 0; return; }
@@ -445,7 +270,6 @@ jobs:
               ] | length
             ' "$file" 2>/dev/null || echo 0
           }
-
           fixed_unfixed() {
             local file="$1"; local sev="$2"
             [ -f "$file" ] || { echo "0|0"; return; }
@@ -461,45 +285,36 @@ jobs:
               | "\($f)|\($u)"
             ' "$file" 2>/dev/null || echo "0|0"
           }
-
+          # ---------- filesystem counts ----------
           FS_CRIT=$(count_severity "$FS_JSON" "CRITICAL")
           FS_HIGH=$(count_severity "$FS_JSON" "HIGH")
           FS_MED=$(count_severity  "$FS_JSON" "MEDIUM")
           FS_LOW=$(count_severity  "$FS_JSON" "LOW")
           FS_UNK=$(count_severity  "$FS_JSON" "UNKNOWN")
           FS_TOT=$((FS_CRIT + FS_HIGH + FS_MED + FS_LOW + FS_UNK))
-
+          # ---------- image counts ----------
           IMG_CRIT=$(count_severity "$IMG_JSON" "CRITICAL")
           IMG_HIGH=$(count_severity "$IMG_JSON" "HIGH")
           IMG_MED=$(count_severity  "$IMG_JSON" "MEDIUM")
           IMG_LOW=$(count_severity  "$IMG_JSON" "LOW")
           IMG_UNK=$(count_severity  "$IMG_JSON" "UNKNOWN")
           IMG_TOT=$((IMG_CRIT + IMG_HIGH + IMG_MED + IMG_LOW + IMG_UNK))
-
+          # ---------- fixed/unfixed (image) ----------
           IFS='|' read -r IMG_FIXED_CRIT IMG_UNFIXED_CRIT <<< "$(fixed_unfixed "$IMG_JSON" "CRITICAL")"
           IFS='|' read -r IMG_FIXED_HIGH  IMG_UNFIXED_HIGH  <<< "$(fixed_unfixed "$IMG_JSON" "HIGH")"
           IFS='|' read -r IMG_FIXED_MED   IMG_UNFIXED_MED   <<< "$(fixed_unfixed "$IMG_JSON" "MEDIUM")"
           IFS='|' read -r IMG_FIXED_LOW   IMG_UNFIXED_LOW   <<< "$(fixed_unfixed "$IMG_JSON" "LOW")"
-
-          if [ "${REMED_STATUS:-pass}" = "pass" ] || [ "$FS_CRIT" -eq 0 ] && [ "$FS_HIGH" -eq 0 ] && [ "$IMG_CRIT" -eq 0 ] && [ "$IMG_HIGH" -eq 0 ]; then
-            STATUS_LINE="✅ Pass — no CRITICAL or HIGH findings"
+          # ---------- status: reuse the gate from step 5 ----------
+          if [ "$FS_CRIT" -gt 0 ] || [ "$FS_HIGH" -gt 0 ] || [ "$IMG_CRIT" -gt 0 ] || [ "$IMG_HIGH" -gt 0 ]; then
+            STATUS="❌ Fail — CRITICAL or HIGH vulnerabilities detected"
           else
-            STATUS_LINE="❌ Fail — CRITICAL or HIGH vulnerabilities remain after ${ITER_LABEL:-0} remediation attempt(s)"
+            STATUS="✅ Pass — no CRITICAL or HIGH findings"
           fi
-
-          REMED_NOTE=""
-          if [ "${REMED_STATUS:-pass}" = "pass" ] && [ "${ITER_LABEL:-0}" -ge 1 ]; then
-            REMED_NOTE="> **Auto-remediation:** patch applied in iteration ${ITER_LABEL}. See \`remediation-log.json\` for the change set."
-          elif [ "${ITER_LABEL:-0}" -ge 1 ]; then
-            REMED_NOTE="> **Auto-remediation:** attempted ${ITER_LABEL} time(s); could not clear the gate. See \`remediation-log.json\` for what was tried."
-          fi
-
+          # ---------- write markdown report ----------
           OUT="trivy-report.md"
           cat > "$OUT" <<EOF
           # Trivy Vulnerability Scan Report
-
           ## Scan Information
-
           | Field | Value |
           |---|---|
           | **Scanner** | Trivy (CLI) |
@@ -508,18 +323,12 @@ jobs:
           | **Commit** | \`${COMMIT_SHORT}\` |
           | **Triggered By** | ${{ github.event_name }} |
           | **Pipeline** | employee-pipeline.yml › trivy-scan |
-          | **Remediation Iterations** | ${ITER_LABEL:-0} |
-
           > Generated automatically from \`trivy-report.json\` (filesystem) and
           > \`trivy-image-report.json\` (image). The image scan targets
           > \`eclipse-temurin:21-jre-jammy\` because the application image is
           > only built in \`trivy-scan.yml\`, not this pipeline.
-          ${REMED_NOTE}
-
           ---
-
           ## Summary by Severity
-
           | Severity | Total | Fixed | Unfixed |
           |---|---|---|---|
           | 🔴 **CRITICAL** | $((FS_CRIT + IMG_CRIT)) | ${IMG_FIXED_CRIT} | ${IMG_UNFIXED_CRIT} |
@@ -528,60 +337,49 @@ jobs:
           | 🔵 **LOW**      | $((FS_LOW + IMG_LOW))   | ${IMG_FIXED_LOW}  | ${IMG_UNFIXED_LOW}  |
           | ⚪ **UNKNOWN**  | $((FS_UNK + IMG_UNK))   | — | — |
           | **TOTAL**       | **$((FS_TOT + IMG_TOT))** | — | — |
-
           ## Summary by Target
-
           | Target | CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN |
           |---|---|---|---|---|---|
           | Filesystem (source + configs)   | ${FS_CRIT} | ${FS_HIGH} | ${FS_MED} | ${FS_LOW} | ${FS_UNK} |
           | Docker base image (\`eclipse-temurin:21-jre-jammy\`) | ${IMG_CRIT} | ${IMG_HIGH} | ${IMG_MED} | ${IMG_LOW} | ${IMG_UNK} |
-
           > _Fixed/Unfixed counts apply to the image target only — Trivy's
           > filesystem scan against source code typically doesn't emit fix
           > status._
-
           ---
-
           _Detailed per-CVE tables and full findings are available in the
           workflow artifacts:_
           - \`trivy-reports/trivy-report.json\` (filesystem, machine-readable)
           - \`trivy-reports/trivy-image-report.json\` (image, machine-readable)
-
           ---
-
-          **Status:** ${STATUS_LINE}
+          **Status:** ${STATUS}
           EOF
-
-          echo "Generated ${OUT}."
-
-      - name: 13. Upload updated markdown + remediation log
+          echo "report_path=${OUT}" >> "$GITHUB_OUTPUT"
+          echo "Generated ${OUT}:"
+          cat "${OUT}"
+      - name: 7. Upload markdown report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report-md
-          path: |
-            trivy-report.md
-            remediation-log.json
+          path: trivy-report.md
           retention-days: 90
           if-no-files-found: error
 
-      - name: 14. Commit patched files and report back to repo
+      - name: 8. Commit report back to repo
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           mkdir -p reports
           cp trivy-report.md reports/trivy-report.md
-          # Only stage files we actually patched (or all of them, safely).
-          git add reports/trivy-report.md pom.xml Dockerfile src/main/resources/application.yml 2>/dev/null || true
+          git add reports/trivy-report.md
           if ! git diff --cached --quiet; then
-            git commit -m "chore(security): auto-remediated Trivy findings [skip ci]"
+            git commit -m "chore(security): update Trivy report [skip ci]"
             git push
           else
             echo "No changes to commit."
           fi
-
-      - name: 15. Comment on PR
+      - name: 9. Comment on PR
         if: github.event_name == 'pull_request' && always()
         uses: actions/github-script@v7
         with:
@@ -601,12 +399,15 @@ jobs:
               issue_number: context.issue.number,
               body: truncated
             });
-
-      - name: 16. Final gate: fail if remediation couldn't clear CRITICAL/HIGH
-        if: steps.remediate.outputs.remediation_status == 'fail'
-        run: |
-          echo "::error::Auto-remediation could not clear the CRITICAL/HIGH gate after the retry budget. Manual intervention required."
-          exit 1
+      - name: 10. Upload Trivy reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-reports
+          path: |
+            trivy-report.json
+            trivy-image-report.json
+          if-no-files-found: warn
+          retention-days: 30
 
   # ----------------------------------------------------------------------
   # JOB 5: NVIDIA Security Review Agent
