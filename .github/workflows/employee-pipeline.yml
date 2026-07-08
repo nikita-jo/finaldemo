@@ -203,7 +203,12 @@ jobs:
 
       - name: 8. Upload SonarQube report
         if: always()
-        uses: actions/upload-artifact@v4](#)
+        uses: actions/upload-artifact@v4
+        with:
+         name: sonarqube-report
+         path: .scannerwork/report-task.txt
+         if-no-files-found: warn
+         retention-days: 30
           
   # JOB 4: NVIDIA Test Coverage Agent
   nvidia-test-agent:
