@@ -170,11 +170,11 @@ jobs:
 
       - name: 6. Run SonarQube scan
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Starting SonarQube scan..."
-          echo "SONAR_TOKEN length: ${#SONAR_TOKEN}"
+          echo "SONAR_TOKEN length: ${#SONARQUBE_TOKEN}"
           echo "SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}"
           mvn -B -ntp -DskipTests \
             -Dsonar.projectVersion=${{ github.sha }} \
@@ -190,7 +190,7 @@ jobs:
           scanMetadataReportFile: .scannerwork/report-task.txt
           pollingTimeoutSec: 300
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
 
       - name: 8. Upload SonarQube report
         if: always()
