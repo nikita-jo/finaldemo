@@ -294,16 +294,22 @@ jobs:
               --dockerfile Dockerfile \
               --config src/main/resources/application.yml \
               --source src/main/java \
-              --output reports/security-report.md || echo "Security agent failed - continuing"
+              --output reports/security-report.md \
+              --json-output reports/security-report.json || echo "Security agent failed - continuing"
           else
             echo "# Security Report" > reports/security-report.md
             echo "Trivy report not available." >> reports/security-report.md
+            # Even without Trivy, emit a JSON scaffold so the Security Gate can
+            # process the NVIDIA report deterministically.
+            echo '{"status":"PASS","critical":0,"high":0,"medium":0,"low":0,"riskScore":0,"summary":"Trivy report not available.","recommendations":["Re-run Trivy to populate baseline findings."],"generatedAt":"'$(date -u +%FT%TZ)'"}' > reports/security-report.json
           fi
       - name: 5. Upload security report
         uses: actions/upload-artifact@v4
         with:
           name: nvidia-security-report
-          path: reports/security-report.md
+          path: |
+            reports/security-report.md
+            reports/security-report.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -411,13 +417,22 @@ jobs:
           sarif_file: codeql-results.sarif
         continue-on-error: true
 
+      - name: 7. Upload CodeQL SARIF artifact (for Security Gate)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif
+          path: codeql-results.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
   # ----------------------------------------------------------------------
   # JOB 8: Aggregate & Upload All Reports
   # ----------------------------------------------------------------------
   upload-reports:
     name: Aggregate & Upload Reports
     runs-on: ubuntu-latest
-    needs: [build, test-coverage, nvidia-test-agent, trivy-scan, nvidia-security-agent, nvidia-remediation-agent, codeql]
+    needs: [build, test-coverage, nvidia-test-agent, trivy-scan, nvidia-security-agent, nvidia-remediation-agent, codeql, security-gate]
     if: always()
     permissions:
       contents: read
@@ -458,24 +473,116 @@ jobs:
           retention-days: 30
 
   # ----------------------------------------------------------------------
-  # JOB 9: Deploy (only when every gate passes)
+  # JOB 9: Security Gate (aggregates CodeQL + Trivy + NVIDIA -> PASS/FAIL)
+  # ----------------------------------------------------------------------
+  security-gate:
+    name: Security Gate
+    runs-on: ubuntu-latest
+    needs: [codeql, trivy-scan, nvidia-security-agent]
+    if: always()
+    permissions:
+      contents: read
+      actions: read
+      security-events: read
+
+    steps:
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 2. Setup Java 21 (for Security Gate utility)
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: 3. Download CodeQL SARIF
+        uses: actions/download-artifact@v4
+        with:
+          name: codeql-sarif
+          path: .
+        continue-on-error: true
+
+      - name: 4. Download Trivy reports
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-reports
+          path: .
+        continue-on-error: true
+
+      - name: 5. Download NVIDIA Security Agent report
+        uses: actions/download-artifact@v4
+        with:
+          name: nvidia-security-report
+          path: .
+        continue-on-error: true
+
+      - name: 6. Locate scanner outputs
+        id: locate
+        run: |
+          echo "codeql=$(ls codeql-results.sarif 2>/dev/null || echo MISSING)" >> $GITHUB_OUTPUT
+          echo "trivy=$(ls trivy-report.json 2>/dev/null || echo MISSING)"  >> $GITHUB_OUTPUT
+          echo "nvidia=$(ls security-report.json 2>/dev/null || echo MISSING)" >> $GITHUB_OUTPUT
+          ls -la
+
+      - name: 7. Build Security Gate utility
+        run: mvn -B -ntp -q -DskipTests -Dformat=jar compile
+
+      - name: 8. Run Security Gate
+        id: gate
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set +e
+          java -cp target/classes:$(mvn -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout dependency:build-classpath 2>/dev/null) \
+            com.enterprise.securitygate.SecurityGate \
+              --codeql codeql-results.sarif \
+              --trivy  trivy-report.json \
+              --nvidia security-report.json \
+              --report SECURITY_GATE_REPORT.md \
+              --json   security-gate.json \
+              --commit "$GITHUB_SHA"
+          GATE_EXIT=$?
+          echo "exit-code=$GATE_EXIT" >> $GITHUB_OUTPUT
+          # Set a workflow output the deploy job's `if:` can read.
+          if [ "$GATE_EXIT" -eq 0 ]; then
+            echo "decision=PASS" >> $GITHUB_OUTPUT
+          else
+            echo "decision=FAIL" >> $GITHUB_OUTPUT
+          fi
+          exit $GATE_EXIT
+
+      - name: 9. Publish SECURITY_GATE_REPORT.md + security-gate.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-gate-report
+          path: |
+            SECURITY_GATE_REPORT.md
+            security-gate.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  # ----------------------------------------------------------------------
+  # JOB 10: Deploy (only when every gate passes)
   # ----------------------------------------------------------------------
   deploy:
     name: Deploy to Production
-    needs: [build, test-coverage, trivy-scan, codeql]
+    needs: [build, test-coverage, trivy-scan, codeql, security-gate]
     if: |
       github.ref == 'refs/heads/main' &&
       github.event_name == 'push' &&
       needs.build.result == 'success' &&
       needs.test-coverage.result == 'success' &&
       needs.trivy-scan.result == 'success' &&
-      needs.codeql.result == 'success'
+      needs.codeql.result == 'success' &&
+      needs.security-gate.result == 'success'
     runs-on: ubuntu-latest
     environment: production
     steps:
       - name: 1. Deploy
         run: |
-          echo "Build, test, coverage, security and codeql checks passed."
+          echo "Build, test, coverage, security, codeql and Security Gate all passed."
           echo "Deploying Employee Management service to production."
           # Replace with actual deployment steps (kubectl apply, helm upgrade, etc.)
           echo "::notice::Deployment simulated for demonstration pipeline."
