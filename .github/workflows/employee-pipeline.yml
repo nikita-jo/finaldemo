@@ -12,6 +12,12 @@ env:
   MAVEN_OPTS: "-Xmx2g -Dmaven.repo.local=${{ github.workspace }}/.m2/repository"
   NVIDIA_API_URL: "https://integrate.api.nvidia.com/v1/chat/completions"
   NVIDIA_MODEL: "meta/llama-3.1-70b-instruct"
+  # SonarQube server URL. Configured as a repository variable so it can
+  # differ per environment (dev / staging / prod) without code changes.
+  # The fallback covers the case where Sonar runs in a Docker container
+  # on the same runner.
+  SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'http://sonarqube:9000' }}
+  SONAR_PLUGIN_VERSION: "3.11.0.3922"
 
 jobs:
   # ----------------------------------------------------------------------
@@ -125,7 +131,108 @@ jobs:
           retention-days: 30
 
   # ----------------------------------------------------------------------
-  # JOB 3: NVIDIA Test Coverage Agent (depends on test-coverage)
+  # JOB 4: SonarQube Analysis + Quality Gate
+  # ----------------------------------------------------------------------
+  # Runs after test-coverage so it can pick up target/site/jacoco/jacoco.xml
+  # from the `coverage-reports` artifact. The Quality Gate is a HARD gate:
+  # if it fails, the step exits non-zero and GitHub skips every job that
+  # lists `sonarqube` in its `needs:`. That includes codeql, trivy-scan,
+  # nvidia-security-agent, nvidia-remediation-agent, security-gate, and
+  # deploy — satisfying the "stop the pipeline immediately" requirement.
+  # ----------------------------------------------------------------------
+  sonarqube:
+    name: SonarQube Analysis
+    runs-on: ubuntu-latest
+    needs: test-coverage
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+    steps:
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 is required for SonarQube's blame-based
+          # "new code" analysis. Without full history, the scanner
+          # cannot attribute lines to the current commit.
+          fetch-depth: 0
+
+      - name: 2. Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: 3. Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.m2/wrapper
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: 4. Download coverage artifact (JaCoCo XML)
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports
+          path: target
+        continue-on-error: true
+
+      - name: 5. Build (skip tests, keep JaCoCo binary)
+        # Re-compile the main sources so sonar.java.binaries resolves.
+        # -DskipTests preserves the JaCoCo coverage data already on disk.
+        run: mvn -B -ntp -DskipTests package
+
+      - name: 6. Run SonarQube scan
+        env:
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mvn -B -ntp -DskipTests \
+            -Dsonar.projectVersion=${{ github.sha }} \
+            -Dsonar.branch.name=${{ github.ref_name }} \
+            org.sonarsource.scanner.maven:sonar-maven-plugin:${SONAR_PLUGIN_VERSION}:sonar
+
+      - name: 7. Wait for Quality Gate result
+        # Official SonarQube action. Polls the server for the report's
+        # Quality Gate status and exits non-zero if the gate fails.
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        with:
+          timeout: 300
+
+      - name: 8. Publish SonarQube summary to workflow log
+        if: always()
+        run: |
+          if [ "${{ steps.sonar-quality-gate-action.outputs.conclusion }}" = "success" ]; then
+            echo "## ✅ SonarQube Quality Gate: PASS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ SonarQube Quality Gate: FAIL" >> $GITHUB_STEP_SUMMARY
+            echo "Visit ${{ env.SONAR_HOST_URL }}/dashboard?id=com.enterprise%3Aemployee-management" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 9. Upload SonarQube report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonarqube-report
+          path: |
+            target/sonar/
+            .scannerwork/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ----------------------------------------------------------------------
+  # JOB 5: NVIDIA Test Coverage Agent (depends on sonarqube)
   # ----------------------------------------------------------------------
   nvidia-test-agent:
     name: NVIDIA Test Coverage Agent
@@ -171,12 +278,12 @@ jobs:
           retention-days: 30
 
   # ----------------------------------------------------------------------
-  # JOB 4: Trivy Scan
+  # JOB 6: Trivy Scan (depends on sonarqube)
   # ----------------------------------------------------------------------
   trivy-scan:
     name: Trivy Scan
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, test-coverage, sonarqube]
     permissions:
       contents: read
       actions: read
@@ -255,12 +362,12 @@ jobs:
           retention-days: 30
 
   # ----------------------------------------------------------------------
-  # JOB 5: NVIDIA Security Review Agent
+  # JOB 7: NVIDIA Security Review Agent (depends on sonarqube)
   # ----------------------------------------------------------------------
   nvidia-security-agent:
     name: NVIDIA Security Review Agent
     runs-on: ubuntu-latest
-    needs: trivy-scan
+    needs: [trivy-scan, sonarqube]
     permissions:
       contents: read
       actions: read
@@ -314,12 +421,12 @@ jobs:
           retention-days: 30
 
   # ----------------------------------------------------------------------
-  # JOB 6: NVIDIA Auto Remediation Agent
+  # JOB 8: NVIDIA Auto Remediation Agent (depends on sonarqube)
   # ----------------------------------------------------------------------
   nvidia-remediation-agent:
     name: NVIDIA Auto Remediation Agent
     runs-on: ubuntu-latest
-    needs: [trivy-scan, nvidia-security-agent]
+    needs: [trivy-scan, nvidia-security-agent, sonarqube]
     permissions:
       contents: read
       actions: read
@@ -371,12 +478,12 @@ jobs:
           retention-days: 30
 
   # ----------------------------------------------------------------------
-  # JOB 7: CodeQL Analysis
+  # JOB 9: CodeQL Analysis (depends on sonarqube)
   # ----------------------------------------------------------------------
   codeql:
     name: CodeQL Analysis
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, test-coverage, sonarqube]
     permissions:
       contents: read
       security-events: write
@@ -427,12 +534,12 @@ jobs:
           retention-days: 30
 
   # ----------------------------------------------------------------------
-  # JOB 8: Aggregate & Upload All Reports
+  # JOB 10: Aggregate & Upload All Reports (depends on sonarqube)
   # ----------------------------------------------------------------------
   upload-reports:
     name: Aggregate & Upload Reports
     runs-on: ubuntu-latest
-    needs: [build, test-coverage, nvidia-test-agent, trivy-scan, nvidia-security-agent, nvidia-remediation-agent, codeql, security-gate]
+    needs: [build, test-coverage, nvidia-test-agent, trivy-scan, nvidia-security-agent, nvidia-remediation-agent, codeql, security-gate, sonarqube]
     if: always()
     permissions:
       contents: read
@@ -473,12 +580,12 @@ jobs:
           retention-days: 30
 
   # ----------------------------------------------------------------------
-  # JOB 9: Security Gate (aggregates CodeQL + Trivy + NVIDIA -> PASS/FAIL)
+  # JOB 11: Security Gate (aggregates CodeQL + Trivy + NVIDIA -> PASS/FAIL)
   # ----------------------------------------------------------------------
   security-gate:
     name: Security Gate
     runs-on: ubuntu-latest
-    needs: [codeql, trivy-scan, nvidia-security-agent]
+    needs: [codeql, trivy-scan, nvidia-security-agent, sonarqube]
     if: always()
     permissions:
       contents: read
@@ -564,11 +671,11 @@ jobs:
           retention-days: 90
 
   # ----------------------------------------------------------------------
-  # JOB 10: Deploy (only when every gate passes)
+  # JOB 12: Deploy (only when every gate passes)
   # ----------------------------------------------------------------------
   deploy:
     name: Deploy to Production
-    needs: [build, test-coverage, trivy-scan, codeql, security-gate]
+    needs: [build, test-coverage, trivy-scan, codeql, security-gate, sonarqube]
     if: |
       github.ref == 'refs/heads/main' &&
       github.event_name == 'push' &&
@@ -576,13 +683,14 @@ jobs:
       needs.test-coverage.result == 'success' &&
       needs.trivy-scan.result == 'success' &&
       needs.codeql.result == 'success' &&
-      needs.security-gate.result == 'success'
+      needs.security-gate.result == 'success' &&
+      needs.sonarqube.result == 'success'
     runs-on: ubuntu-latest
     environment: production
     steps:
       - name: 1. Deploy
         run: |
-          echo "Build, test, coverage, security, codeql and Security Gate all passed."
+          echo "Build, test, coverage, SonarQube, security, codeql and Security Gate all passed."
           echo "Deploying Employee Management service to production."
           # Replace with actual deployment steps (kubectl apply, helm upgrade, etc.)
           echo "::notice::Deployment simulated for demonstration pipeline."

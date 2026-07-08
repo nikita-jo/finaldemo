@@ -29,4 +29,6 @@ reports/
 trivy-report.json
 trivy-image-report.json
 codeql-results.sarif
+.scannerwork/
+target/sonar/
 .env

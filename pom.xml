@@ -25,6 +25,7 @@
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jacoco.version>0.8.12</jacoco.version>
+        <sonar.plugin.version>3.11.0.3922</sonar.plugin.version>
         <mockito.version>5.12.0</mockito.version>
         <jackson.databind.version>2.17.2</jackson.databind.version>
         <log4j.version>2.24.0</log4j.version>
@@ -154,6 +155,17 @@
                         </configuration>
                     </execution>
                 </executions>
+            </plugin>
+
+            <!-- SonarQube Maven Plugin
+                 Invoked only by the SonarQube GitHub Actions job via
+                 `mvn ... org.sonarsource.scanner.maven:sonar-maven-plugin:sonar`.
+                 No `execution` block is needed because the plugin is not
+                 bound to the standard build lifecycle. -->
+            <plugin>
+                <groupId>org.sonarsource.scanner.maven</groupId>
+                <artifactId>sonar-maven-plugin</artifactId>
+                <version>${sonar.plugin.version}</version>
             </plugin>
         </plugins>
     </build>

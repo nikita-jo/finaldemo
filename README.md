@@ -1,6 +1,6 @@
 # Employee Management Service
 
-Enterprise-grade Spring Boot 3.3.x REST API for managing employees, built with Java 21, JUnit 5, Mockito, JaCoCo, Docker, Trivy, CodeQL, and NVIDIA NIM AI agents.
+Enterprise-grade Spring Boot 3.3.x REST API for managing employees, built with Java 21, JUnit 5, Mockito, JaCoCo, Docker, Trivy, CodeQL, SonarQube Community Edition, and NVIDIA NIM AI agents.
 
 ## Stack
 
@@ -11,6 +11,7 @@ Enterprise-grade Spring Boot 3.3.x REST API for managing employees, built with J
 - JUnit 5 + Mockito + AssertJ
 - JaCoCo (HTML, XML, CSV)
 - Maven
+- SonarQube Community Edition (static analysis + Quality Gate)
 - GitHub Actions, Docker, Trivy, CodeQL
 - NVIDIA NIM API (Llama 3.1 70B Instruct)
 
@@ -55,13 +56,14 @@ See `.github/workflows/employee-pipeline.yml`. The pipeline runs:
 4. Build
 5. Unit Test
 6. JaCoCo Coverage
-7. NVIDIA Test Coverage Agent
-8. Trivy Scan
-9. NVIDIA Security Review Agent
-10. NVIDIA Auto Remediation Agent
-11. CodeQL Analysis
-12. Upload Reports
-13. Deploy (only when all gates pass)
+7. SonarQube Analysis + Quality Gate
+8. NVIDIA Test Coverage Agent
+9. Trivy Scan
+10. NVIDIA Security Review Agent
+11. NVIDIA Auto Remediation Agent
+12. CodeQL Analysis
+13. Upload Reports
+14. Deploy (only when all gates pass)
 
 ## NVIDIA Agents
 
