@@ -9,7 +9,7 @@ import java.util.Objects;
  * the policy, and prints the other fields in the Markdown report.
  */
 public final class Finding {
-    public enum Source { CODEQL, TRIVY, NVIDIA }
+    public enum Source { CODEQL, TRIVY, NVIDIA, SONAR }
 
     private final Source source;
     private final String ruleId;       // e.g. CWE-89, CVE-2024-..., java/sql-injection

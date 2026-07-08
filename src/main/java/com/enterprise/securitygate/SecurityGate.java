@@ -67,6 +67,11 @@ public final class SecurityGate {
         } catch (IOException e) {
             System.err.println("::warning::Failed to parse NVIDIA JSON: " + e.getMessage());
         }
+        try {
+            findings.addAll(new SonarQubeMeasuresParser().parse(parsed.sonar));
+        } catch (IOException e) {
+            System.err.println("::warning::Failed to parse SonarQube measures: " + e.getMessage());
+        }
 
         List<Finding> deduped = deduplicate(findings);
         SecurityPolicy policy = parsed.policy();
@@ -75,6 +80,7 @@ public final class SecurityGate {
         String trivySummary  = summarise("Trivy", parsed.trivy);
         String codeqlSummary = summarise("CodeQL", parsed.codeql);
         String nvidiaSummary = summarise("NVIDIA", parsed.nvidia);
+        String sonarSummary  = summariseSonar("SonarQube", parsed.sonar, deduped);
 
         try {
             new ReportWriter().write(
@@ -86,7 +92,8 @@ public final class SecurityGate {
                     deduped,
                     trivySummary,
                     codeqlSummary,
-                    nvidiaSummary);
+                    nvidiaSummary,
+                    sonarSummary);
         } catch (IOException e) {
             System.err.println("::error::Failed to write Markdown report: " + e.getMessage());
             System.exit(1);
@@ -129,6 +136,47 @@ public final class SecurityGate {
         return "- File: `" + path + "` (" + bytes + " bytes)\n";
     }
 
+    /**
+     * Produce a compact summary of the SonarQube measures that were
+     * consumed by the policy. The values mirror the Quality Gate
+     * conditions from the task brief so a reviewer can confirm them at
+     * a glance in the Markdown report.
+     */
+    private static String summariseSonar(String label, Path path, List<Finding> findings) {
+        StringBuilder sb = new StringBuilder();
+        if (path == null || !Files.exists(path)) {
+            return "_" + label + " measures not found._\n";
+        }
+        long bytes;
+        try { bytes = Files.size(path); } catch (IOException e) { bytes = -1; }
+        sb.append("- File: `").append(path).append("` (").append(bytes).append(" bytes)\n");
+        sb.append("\n| Metric | Observed | Threshold | Status |\n|---|---|---|---|\n");
+        appendSonarRow(sb, findings, "blocker_violations",     "0",  "sonar:pass");
+        appendSonarRow(sb, findings, "critical_violations",    "0",  "sonar:pass");
+        appendSonarRow(sb, findings, "new_bugs",               "0",  "sonar:pass");
+        appendSonarRow(sb, findings, "security_rating",        "1 (A)",  "sonar:pass");
+        appendSonarRow(sb, findings, "reliability_rating",     "1 (A)",  "sonar:pass");
+        appendSonarRow(sb, findings, "new_coverage",           "≥80.0%", "sonar:pass");
+        appendSonarRow(sb, findings, "duplicated_lines_density","≤3.0%",  "sonar:pass");
+        return sb.toString();
+    }
+
+    private static void appendSonarRow(StringBuilder sb, List<Finding> findings,
+                                       String metric, String threshold, String passToken) {
+        for (Finding f : findings) {
+            if (f.source() != Finding.Source.SONAR) continue;
+            if (!f.ruleId().equals("sonar:" + metric)) continue;
+            String status = f.severity() == Severity.CRITICAL ? "❌ FAIL" : "✅ PASS";
+            sb.append("| `").append(metric).append("` | ")
+              .append(f.description().substring(f.description().indexOf('=') + 1).trim())
+              .append(" | ").append(threshold).append(" | ").append(status).append(" |\n");
+            return;
+        }
+        // Metric not present in the measures response.
+        sb.append("| `").append(metric).append("` | _not reported_ | ")
+          .append(threshold).append(" | ⚠️  UNKNOWN |\n");
+    }
+
     private static void printConsoleSummary(SecurityPolicy.Decision decision, List<Finding> findings) {
         System.out.println();
         System.out.println("================ SECURITY GATE ================");
@@ -165,6 +213,7 @@ public final class SecurityGate {
         Path codeql;
         Path trivy;
         Path nvidia;
+        Path sonar;
         String report;
         String json;
         String commit;
@@ -181,6 +230,7 @@ public final class SecurityGate {
                     case "--codeql" -> { a.codeql = Paths.get(require(v, k)); i++; }
                     case "--trivy" -> { a.trivy = Paths.get(require(v, k)); i++; }
                     case "--nvidia" -> { a.nvidia = Paths.get(require(v, k)); i++; }
+                    case "--sonar" -> { a.sonar = Paths.get(require(v, k)); i++; }
                     case "--report" -> { a.report = require(v, k); i++; }
                     case "--json" -> { a.json = require(v, k); i++; }
                     case "--commit" -> { a.commit = v; i++; }
@@ -212,7 +262,7 @@ public final class SecurityGate {
 
         static void printUsage(java.io.PrintStream out) {
             out.println("Usage: java com.enterprise.securitygate.SecurityGate " +
-                    "[--codeql SARIF] [--trivy JSON] [--nvidia JSON] " +
+                    "[--codeql SARIF] [--trivy JSON] [--nvidia JSON] [--sonar JSON] " +
                     "[--report PATH] [--json PATH] [--commit SHA] [--strict]");
         }
     }

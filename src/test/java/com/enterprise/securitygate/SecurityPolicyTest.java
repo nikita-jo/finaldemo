@@ -109,6 +109,57 @@ class SecurityPolicyTest {
         assertFalse(d.isPass());
     }
 
+    // ------------------------------------------------------------------
+    // SonarQube Quality Gate (defense-in-depth)
+    // ------------------------------------------------------------------
+
+    /** Any Blocker issue present should fail the gate, mirroring the
+     *  brief's "Blocker Issues > 0" rule. */
+    @Test
+    void failsOnSonarBlockerViolation() {
+        SecurityPolicy p = SecurityPolicy.builder().build();
+        SecurityPolicy.Decision d = p.evaluate(List.of(
+                new Finding(Finding.Source.SONAR, "sonar:blocker_violations",
+                        Severity.CRITICAL, "blocker-issues", "", null,
+                        "blocker_violations = 1")));
+        assertFalse(d.isPass());
+        assertTrue(d.reasons().stream()
+                .anyMatch(r -> r.contains("SonarQube") && r.contains("blocker")));
+    }
+
+    /** Security rating is below A (numeric 2 == B). The brief says the
+     *  gate must fail. */
+    @Test
+    void failsOnSonarSecurityRatingBelowA() {
+        SecurityPolicy p = SecurityPolicy.builder().build();
+        SecurityPolicy.Decision d = p.evaluate(List.of(
+                new Finding(Finding.Source.SONAR, "sonar:security_rating",
+                        Severity.CRITICAL, "security-rating", "", null,
+                        "security_rating = 2 (B)")));
+        assertFalse(d.isPass());
+        assertTrue(d.reasons().stream()
+                .anyMatch(r -> r.contains("SonarQube") && r.contains("security rating")));
+    }
+
+    /** Coverage strictly less than 80% should fail; coverage >= 80% should pass. */
+    @Test
+    void failsOnSonarCoverageBelow80() {
+        SecurityPolicy p = SecurityPolicy.builder().build();
+        SecurityPolicy.Decision d = p.evaluate(List.of(
+                new Finding(Finding.Source.SONAR, "sonar:new_coverage",
+                        Severity.CRITICAL, "new-coverage", "", null,
+                        "new_coverage = 65.0%")));
+        assertFalse(d.isPass());
+        assertTrue(d.reasons().stream()
+                .anyMatch(r -> r.contains("SonarQube") && r.contains("coverage")));
+
+        SecurityPolicy.Decision pass = p.evaluate(List.of(
+                new Finding(Finding.Source.SONAR, "sonar:new_coverage",
+                        Severity.CRITICAL, "new-coverage", "", null,
+                        "new_coverage = 85.0%")));
+        assertTrue(pass.isPass(), "85% coverage should pass the >=80% threshold");
+    }
+
     private static Finding finding(String id) {
         return new Finding(Finding.Source.TRIVY, id, Severity.HIGH, "vuln", "pkg@1.0", "1.1", "x");
     }

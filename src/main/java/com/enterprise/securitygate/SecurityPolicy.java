@@ -48,6 +48,69 @@ public final class SecurityPolicy {
         }
     }
 
+    /**
+     * Quality Gate thresholds evaluated from SonarQube's
+     * <code>api/measures/component</code> response. The defaults match the
+     * task brief exactly.
+     *
+     * <p>Ratings are numeric: 1 = A, 2 = B, 3 = C, 4 = D, 5 = E. A
+     * "Security Rating is below A" check is therefore expressed as
+     * <code>securityRating &gt; securityRatingMax (=1)</code>.
+     */
+    public static final class SonarGate {
+        public final int blockerMax;             // 0 by default
+        public final int criticalMax;            // 0 by default
+        public final int newBugsMax;             // 0 by default
+        public final int newVulnerabilitiesMax;  // 0 by default
+        public final int securityRatingMax;      // 1 = "must be A"
+        public final int reliabilityRatingMax;   // 1 = "must be A"
+        public final int newSecurityRatingMax;   // 1 = "new code security must be A"
+        public final int newReliabilityRatingMax;// 1 = "new code reliability must be A"
+        public final double coverageMin;         // 80.0 by default
+        public final double newCoverageMin;      // 80.0 by default
+        public final double duplicationsMax;     // 3.0 by default
+
+        public SonarGate(int blockerMax,
+                         int criticalMax,
+                         int newBugsMax,
+                         int newVulnerabilitiesMax,
+                         int securityRatingMax,
+                         int reliabilityRatingMax,
+                         int newSecurityRatingMax,
+                         int newReliabilityRatingMax,
+                         double coverageMin,
+                         double newCoverageMin,
+                         double duplicationsMax) {
+            this.blockerMax = blockerMax;
+            this.criticalMax = criticalMax;
+            this.newBugsMax = newBugsMax;
+            this.newVulnerabilitiesMax = newVulnerabilitiesMax;
+            this.securityRatingMax = securityRatingMax;
+            this.reliabilityRatingMax = reliabilityRatingMax;
+            this.newSecurityRatingMax = newSecurityRatingMax;
+            this.newReliabilityRatingMax = newReliabilityRatingMax;
+            this.coverageMin = coverageMin;
+            this.newCoverageMin = newCoverageMin;
+            this.duplicationsMax = duplicationsMax;
+        }
+
+        /** The values from the task brief. */
+        public static SonarGate defaults() {
+            return new SonarGate(
+                    0,  // blockerMax
+                    0,  // criticalMax
+                    0,  // newBugsMax
+                    0,  // newVulnerabilitiesMax
+                    1,  // securityRatingMax     (1 == A)
+                    1,  // reliabilityRatingMax  (1 == A)
+                    1,  // newSecurityRatingMax
+                    1,  // newReliabilityRatingMax
+                    80.0, // coverageMin
+                    80.0, // newCoverageMin
+                    3.0); // duplicationsMax
+        }
+    }
+
     private final SeverityThresholds trivy;
     private final SeverityThresholds nvidia;
     private final boolean codeqlBlockOnCritical;
@@ -57,6 +120,7 @@ public final class SecurityPolicy {
     private final boolean trivyBlockOnMalware;
     private final boolean trivyBlockOnSecret;
     private final List<String> ignoredRules;             // lower-cased rule IDs
+    private final SonarGate sonarGate;
 
     private SecurityPolicy(Builder b) {
         this.trivy = Objects.requireNonNull(b.trivy, "trivy thresholds");
@@ -68,10 +132,12 @@ public final class SecurityPolicy {
         this.trivyBlockOnMalware = b.trivyBlockOnMalware;
         this.trivyBlockOnSecret = b.trivyBlockOnSecret;
         this.ignoredRules = lower(b.ignoredRules);
+        this.sonarGate = Objects.requireNonNull(b.sonarGate, "sonar gate");
     }
 
     public SeverityThresholds trivyThresholds()   { return trivy; }
     public SeverityThresholds nvidiaThresholds()  { return nvidia; }
+    public SonarGate sonarGate()                  { return sonarGate; }
 
     /**
      * Run the policy. Findings whose ruleId is in {@code ignoredRules} are
@@ -171,6 +237,15 @@ public final class SecurityPolicy {
                     .formatted(nvidiaHigh, nvidia.highMax));
         }
 
+        // ----- SonarQube Quality Gate (defense in depth) -----
+        // SonarQube already enforced these conditions server-side via
+        // its built-in Quality Gate, and the `sonarqube-quality-gate-action`
+        // step will have failed the job if the server said "FAILED".
+        // We re-evaluate the same conditions here so a mis-configured
+        // server, a disabled gate, or a missing endpoint cannot let a
+        // bad build pass.
+        evaluateSonar(reasons, active);
+
         return new Decision(reasons.isEmpty() ? "PASS" : "FAIL", reasons, counts);
     }
 
@@ -181,6 +256,143 @@ public final class SecurityPolicy {
             reasons = Collections.unmodifiableList(new ArrayList<>(reasons));
         }
         public boolean isPass() { return "PASS".equals(status); }
+    }
+
+    // ------------------------------------------------------------------
+    // SonarQube evaluation
+    // ------------------------------------------------------------------
+
+    /**
+     * Inspect every {@link Finding.Source#SONAR} finding (produced by
+     * {@link SonarQubeMeasuresParser}) and add a reason for each Quality
+     * Gate rule that failed. Each rule mirrors the condition from the
+     * task brief.
+     */
+    private void evaluateSonar(List<String> reasons, List<Finding> active) {
+        SonarGate g = sonarGate;
+
+        // Issue counts. The parser emits one finding per metric key, so
+        // we look up the value from the description (e.g. "blocker_violations = 0").
+        Integer blocker = sonarIntMetric(active, "blocker_violations");
+        if (blocker != null && blocker > g.blockerMax) {
+            reasons.add("SonarQube: %d blocker issue(s) exceed threshold (%d)"
+                    .formatted(blocker, g.blockerMax));
+        }
+
+        Integer critical = sonarIntMetric(active, "critical_violations");
+        if (critical != null && critical > g.criticalMax) {
+            reasons.add("SonarQube: %d critical issue(s) exceed threshold (%d)"
+                    .formatted(critical, g.criticalMax));
+        }
+
+        Integer newBugs = sonarIntMetric(active, "new_bugs");
+        if (newBugs != null && newBugs > g.newBugsMax) {
+            reasons.add("SonarQube: %d new bug(s) detected (threshold %d)"
+                    .formatted(newBugs, g.newBugsMax));
+        }
+
+        Integer newVulns = sonarIntMetric(active, "new_vulnerabilities");
+        if (newVulns != null && newVulns > g.newVulnerabilitiesMax) {
+            reasons.add("SonarQube: %d new vulnerabilit(ies) detected (threshold %d)"
+                    .formatted(newVulns, g.newVulnerabilitiesMax));
+        }
+
+        // Ratings — 1 == A. Anything > 1 is below A.
+        Integer sec = sonarRating(active, "security_rating");
+        if (sec != null && sec > g.securityRatingMax) {
+            reasons.add("SonarQube: security rating is below A (observed %d, threshold 1)"
+                    .formatted(sec));
+        }
+        Integer rel = sonarRating(active, "reliability_rating");
+        if (rel != null && rel > g.reliabilityRatingMax) {
+            reasons.add("SonarQube: reliability rating is below A (observed %d, threshold 1)"
+                    .formatted(rel));
+        }
+        Integer newSec = sonarRating(active, "new_security_rating");
+        if (newSec != null && newSec > g.newSecurityRatingMax) {
+            reasons.add("SonarQube: new-code security rating is below A (observed %d, threshold 1)"
+                    .formatted(newSec));
+        }
+        Integer newRel = sonarRating(active, "new_reliability_rating");
+        if (newRel != null && newRel > g.newReliabilityRatingMax) {
+            reasons.add("SonarQube: new-code reliability rating is below A (observed %d, threshold 1)"
+                    .formatted(newRel));
+        }
+
+        // Coverage — strictly less than the minimum is a fail. We treat
+        // a missing coverage value as "unknown" and do not block.
+        Double cov = sonarDoubleMetric(active, "new_coverage");
+        if (cov == null) cov = sonarDoubleMetric(active, "coverage");
+        if (cov != null && cov < g.newCoverageMin) {
+            reasons.add("SonarQube: coverage %.1f%% is below threshold %.1f%%"
+                    .formatted(cov, g.newCoverageMin));
+        }
+
+        Double dup = sonarDoubleMetric(active, "duplicated_lines_density");
+        if (dup != null && dup > g.duplicationsMax) {
+            reasons.add("SonarQube: duplicated code %.1f%% exceeds threshold %.1f%%"
+                    .formatted(dup, g.duplicationsMax));
+        }
+    }
+
+    /**
+     * Parse the integer stored in a SonarQube finding's description
+     * (e.g. <code>"blocker_violations = 3"</code> → 3). Returns
+     * {@code null} if the metric is absent in the input.
+     */
+    private static Integer sonarIntMetric(List<Finding> active, String metricKey) {
+        for (Finding f : active) {
+            if (f.source() != Finding.Source.SONAR) continue;
+            if (!f.ruleId().equals("sonar:" + metricKey)) continue;
+            String desc = f.description();
+            int eq = desc.lastIndexOf('=');
+            if (eq < 0) continue;
+            try {
+                return Integer.parseInt(desc.substring(eq + 1).trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static Integer sonarRating(List<Finding> active, String metricKey) {
+        for (Finding f : active) {
+            if (f.source() != Finding.Source.SONAR) continue;
+            if (!f.ruleId().equals("sonar:" + metricKey)) continue;
+            String desc = f.description();
+            int eq = desc.lastIndexOf('=');
+            if (eq < 0) continue;
+            String tail = desc.substring(eq + 1).trim();
+            // The parser formats ratings as "1 (A)".
+            int sp = tail.indexOf(' ');
+            String num = sp > 0 ? tail.substring(0, sp) : tail;
+            try {
+                return Integer.parseInt(num);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static Double sonarDoubleMetric(List<Finding> active, String metricKey) {
+        for (Finding f : active) {
+            if (f.source() != Finding.Source.SONAR) continue;
+            if (!f.ruleId().equals("sonar:" + metricKey)) continue;
+            String desc = f.description();
+            int eq = desc.lastIndexOf('=');
+            if (eq < 0) continue;
+            String tail = desc.substring(eq + 1).trim();
+            // Strip the trailing "%" if present.
+            if (tail.endsWith("%")) tail = tail.substring(0, tail.length() - 1);
+            try {
+                return Double.parseDouble(tail);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -201,6 +413,7 @@ public final class SecurityPolicy {
         private boolean trivyBlockOnMalware = true;
         private boolean trivyBlockOnSecret = true;
         private List<String> ignoredRules = List.of();
+        private SonarGate sonarGate = SonarGate.defaults();
 
         public Builder trivyThresholds(SeverityThresholds t) { this.trivy = t; return this; }
         public Builder nvidiaThresholds(SeverityThresholds t) { this.nvidia = t; return this; }
@@ -211,6 +424,7 @@ public final class SecurityPolicy {
         public Builder trivyBlockOnMalware(boolean v) { this.trivyBlockOnMalware = v; return this; }
         public Builder trivyBlockOnSecret(boolean v) { this.trivyBlockOnSecret = v; return this; }
         public Builder ignoredRules(List<String> v) { this.ignoredRules = v; return this; }
+        public Builder sonarGate(SonarGate g) { this.sonarGate = g == null ? SonarGate.defaults() : g; return this; }
 
         public SecurityPolicy build() { return new SecurityPolicy(this); }
     }

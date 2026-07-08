@@ -27,7 +27,8 @@ public final class ReportWriter {
                       List<Finding> allFindings,
                       String trivySummary,
                       String codeqlSummary,
-                      String nvidiaSummary) throws IOException {
+                      String nvidiaSummary,
+                      String sonarSummary) throws IOException {
 
         if (out.getParent() != null) {
             Files.createDirectories(out.getParent());
@@ -36,13 +37,14 @@ public final class ReportWriter {
         int[] codeqlCounts = decision.counts().getOrDefault(Finding.Source.CODEQL, zero());
         int[] trivyCounts  = decision.counts().getOrDefault(Finding.Source.TRIVY,  zero());
         int[] nvidiaCounts = decision.counts().getOrDefault(Finding.Source.NVIDIA, zero());
+        int[] sonarCounts  = decision.counts().getOrDefault(Finding.Source.SONAR,  zero());
 
-        int critical = sum(codeqlCounts, Severity.CRITICAL) + sum(trivyCounts, Severity.CRITICAL) + sum(nvidiaCounts, Severity.CRITICAL);
-        int high     = sum(codeqlCounts, Severity.HIGH)     + sum(trivyCounts, Severity.HIGH)     + sum(nvidiaCounts, Severity.HIGH);
-        int medium   = sum(codeqlCounts, Severity.MEDIUM)   + sum(trivyCounts, Severity.MEDIUM)   + sum(nvidiaCounts, Severity.MEDIUM);
-        int low      = sum(codeqlCounts, Severity.LOW)      + sum(trivyCounts, Severity.LOW)      + sum(nvidiaCounts, Severity.LOW);
+        int critical = sum(codeqlCounts, Severity.CRITICAL) + sum(trivyCounts, Severity.CRITICAL) + sum(nvidiaCounts, Severity.CRITICAL) + sum(sonarCounts, Severity.CRITICAL);
+        int high     = sum(codeqlCounts, Severity.HIGH)     + sum(trivyCounts, Severity.HIGH)     + sum(nvidiaCounts, Severity.HIGH)     + sum(sonarCounts, Severity.HIGH);
+        int medium   = sum(codeqlCounts, Severity.MEDIUM)   + sum(trivyCounts, Severity.MEDIUM)   + sum(nvidiaCounts, Severity.MEDIUM)   + sum(sonarCounts, Severity.MEDIUM);
+        int low      = sum(codeqlCounts, Severity.LOW)      + sum(trivyCounts, Severity.LOW)      + sum(nvidiaCounts, Severity.LOW)      + sum(sonarCounts, Severity.LOW);
 
-        int riskScore = computeRiskScore(codeqlCounts, trivyCounts, nvidiaCounts);
+        int riskScore = computeRiskScore(codeqlCounts, trivyCounts, nvidiaCounts, sonarCounts);
 
         StringBuilder md = new StringBuilder();
         md.append("# Security Gate Report\n\n");
@@ -74,6 +76,11 @@ public final class ReportWriter {
           .append(nvidiaCounts[Severity.HIGH.weight()]).append(" | ")
           .append(nvidiaCounts[Severity.MEDIUM.weight()]).append(" | ")
           .append(nvidiaCounts[Severity.LOW.weight()]).append(" |\n");
+        md.append("| SonarQube | ")
+          .append(sonarCounts[Severity.CRITICAL.weight()]).append(" | ")
+          .append(sonarCounts[Severity.HIGH.weight()]).append(" | ")
+          .append(sonarCounts[Severity.MEDIUM.weight()]).append(" | ")
+          .append(sonarCounts[Severity.LOW.weight()]).append(" |\n");
         md.append("| **Total** | **").append(critical).append("** | **")
           .append(high).append("** | **").append(medium).append("** | **").append(low).append("** |\n\n");
 
@@ -81,6 +88,7 @@ public final class ReportWriter {
         md.append("### CodeQL\n").append(codeqlSummary).append("\n\n");
         md.append("### Trivy\n").append(trivySummary).append("\n\n");
         md.append("### NVIDIA Security Agent\n").append(nvidiaSummary).append("\n\n");
+        md.append("### SonarQube\n").append(sonarSummary).append("\n\n");
 
         if (decision.isPass()) {
             md.append("## Blocking Issues\n\n_None — the Security Gate **PASSED**._\n\n");
@@ -135,11 +143,11 @@ public final class ReportWriter {
         return recs;
     }
 
-    private static int computeRiskScore(int[] c, int[] t, int[] n) {
-        int raw = (c[Severity.CRITICAL.weight()] + t[Severity.CRITICAL.weight()] + n[Severity.CRITICAL.weight()]) * 15
-                + (c[Severity.HIGH.weight()]     + t[Severity.HIGH.weight()]     + n[Severity.HIGH.weight()])     * 7
-                + (c[Severity.MEDIUM.weight()]   + t[Severity.MEDIUM.weight()]   + n[Severity.MEDIUM.weight()])   * 3
-                + (c[Severity.LOW.weight()]      + t[Severity.LOW.weight()]      + n[Severity.LOW.weight()])      * 1;
+    private static int computeRiskScore(int[] c, int[] t, int[] n, int[] s) {
+        int raw = (c[Severity.CRITICAL.weight()] + t[Severity.CRITICAL.weight()] + n[Severity.CRITICAL.weight()] + s[Severity.CRITICAL.weight()]) * 15
+                + (c[Severity.HIGH.weight()]     + t[Severity.HIGH.weight()]     + n[Severity.HIGH.weight()]     + s[Severity.HIGH.weight()])     * 7
+                + (c[Severity.MEDIUM.weight()]   + t[Severity.MEDIUM.weight()]   + n[Severity.MEDIUM.weight()]   + s[Severity.MEDIUM.weight()])   * 3
+                + (c[Severity.LOW.weight()]      + t[Severity.LOW.weight()]      + n[Severity.LOW.weight()]      + s[Severity.LOW.weight()])      * 1;
         return Math.min(100, (int) Math.round((raw / 126.0) * 100));
     }
 
