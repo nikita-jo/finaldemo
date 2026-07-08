@@ -177,13 +177,13 @@ jobs:
             -Dsonar.branch.name=${{ github.ref_name }} \
             org.sonarsource.scanner.maven:sonar-maven-plugin:${SONAR_PLUGIN_VERSION}:sonar
 
-       - name: 7. Wait for Quality Gate result
-         env:
-         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-         SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-         uses: sonarsource/sonarqube-quality-gate-action@master
-         with:
-         pollingTimeoutSec: 300
+      - name: 7. Wait for Quality Gate result
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        with:
+            pollingTimeoutSec: 300
 
       - name: 8. Publish SonarQube summary to workflow log
         if: always()
