@@ -126,6 +126,7 @@ jobs:
           retention-days: 30
 
   # JOB 3: SonarQube Analysis + Quality Gate
+    # JOB 3: SonarQube Analysis + Quality Gate
   sonarqube:
     name: SonarQube Analysis
     runs-on: ubuntu-latest
@@ -157,45 +158,41 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-maven-
 
-      - name: 4. Download coverage artifact (JaCoCo XML)
+      - name: 4. Download coverage artifact
         uses: actions/download-artifact@v4
         with:
           name: coverage-reports
           path: target
         continue-on-error: true
 
-      - name: 5. Build (skip tests, keep JaCoCo binary)
+      - name: 5. Build (skip tests)
         run: mvn -B -ntp -DskipTests package
 
       - name: 6. Run SonarQube scan
         env:
-          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          echo "Starting SonarQube scan..."
+          echo "SONAR_TOKEN length: ${#SONAR_TOKEN}"
+          echo "SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}"
           mvn -B -ntp -DskipTests \
             -Dsonar.projectVersion=${{ github.sha }} \
             -Dsonar.branch.name=${{ github.ref_name }} \
+            -Dsonar.scm.disabled=false \
             org.sonarsource.scanner.maven:sonar-maven-plugin:${SONAR_PLUGIN_VERSION}:sonar
+          echo "SonarQube scan completed"
+          ls -la .scannerwork/ || echo "No .scannerwork directory"
 
-      - name: 7. Wait for Quality Gate result
-        env:
-          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+      - name: 7. Wait for Quality Gate
         uses: sonarsource/sonarqube-quality-gate-action@master
         with:
-            pollingTimeoutSec: 300
+          scanMetadataReportFile: .scannerwork/report-task.txt
+          pollingTimeoutSec: 300
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-      - name: 8. Publish SonarQube summary to workflow log
-        if: always()
-        run: |
-          if [ "${{ steps.sonar-quality-gate-action.outputs.conclusion }}" = "success" ]; then
-            echo "## ✅ SonarQube Quality Gate: PASS" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## ❌ SonarQube Quality Gate: FAIL" >> $GITHUB_STEP_SUMMARY
-            echo "Visit ${{ env.SONAR_HOST_URL }}/dashboard?id=com.enterprise%3Aemployee-management" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: 9. Upload SonarQube report artifact
+      - name: 8. Upload SonarQube report
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -205,7 +202,7 @@ jobs:
             .scannerwork/
           if-no-files-found: warn
           retention-days: 30
-
+          
   # JOB 4: NVIDIA Test Coverage Agent
   nvidia-test-agent:
     name: NVIDIA Test Coverage Agent
