@@ -20,10 +20,12 @@
     <description>Enterprise Employee Management REST API</description>
 
     <properties>
-  <sonar.projectKey>nikita-jo_finaldemo</sonar.projectKey>
-  <sonar.organization>nikita-jo</sonar.organization>
-  <sonar.host.url>https://sonarcloud.io</sonar.host.url>
-</properties>
+        <sonar.projectKey>nikita-jo_finaldemo</sonar.projectKey>
+        <sonar.organization>nikita-jo</sonar.organization>
+        <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+        <jacoco.version>0.8.11</jacoco.version>
+        <sonar.plugin.version>3.11.0.3922</sonar.plugin.version>
+    </properties>
 
     <dependencies>
         <!-- Spring Boot Starters -->
