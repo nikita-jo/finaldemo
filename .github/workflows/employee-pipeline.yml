@@ -163,36 +163,38 @@ jobs:
       - name: 5. Build (skip tests)
         run: mvn -B -ntp -DskipTests package
 
-      - name: 6. Run SonarQube scan
-        env:
-          SONARQUBE_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          echo "Starting SonarQube scan..."
-          echo "SONARQUBE_TOKEN length: ${#SONARQUBE_TOKEN}"
-          echo "SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}"
-          
-          if [ -z "$SONARQUBE_TOKEN" ]; then
-            echo "::error::SONARQUBE_TOKEN is not set"
-            exit 1
-          fi
-          
-          mvn -B -ntp -DskipTests \
-            -Dsonar.projectVersion=${{ github.sha }} \
-            -Dsonar.branch.name=${{ github.ref_name }} \
-            -Dsonar.scm.disabled=false \
-            org.sonarsource.scanner.maven:sonar-maven-plugin:${SONAR_PLUGIN_VERSION}:sonar
-          
-          echo "SonarQube scan completed"
-          
-          if [ ! -f .scannerwork/report-task.txt ]; then
-            echo "::error::.scannerwork/report-task.txt not found"
-            ls -la .scannerwork/ || echo "No .scannerwork directory"
-            exit 1
-          fi
-          
-          echo "✅ .scannerwork/report-task.txt exists"
+     - name: 6. Run SonarQube scan
+  env:
+    SONARQUBE_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  run: |
+    set -e
+    echo "Starting SonarQube scan..."
+    echo "SONARQUBE_TOKEN length: ${#SONARQUBE_TOKEN}"
+    echo "SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}"
+    
+    if [ -z "$SONARQUBE_TOKEN" ]; then
+      echo "::error::SONARQUBE_TOKEN is not set"
+      exit 1
+    fi
+    
+    mvn -B -ntp -DskipTests \
+      -Dsonar.projectVersion=${{ github.sha }} \
+      -Dsonar.branch.name=${{ github.ref_name }} \
+      -Dsonar.scm.disabled=false \
+      -Dsonar.projectKey=nikita-jo_finaldemo \
+      -Dsonar.organization=your-sonarcloud-org \
+      org.sonarsource.scanner.maven:sonar-maven-plugin:${SONAR_PLUGIN_VERSION}:sonar
+    
+    echo "SonarQube scan completed"
+    
+    if [ ! -f .scannerwork/report-task.txt ]; then
+      echo "::error::.scannerwork/report-task.txt not found"
+      ls -la .scannerwork/ || echo "No .scannerwork directory"
+      exit 1
+    fi
+    
+    echo "✅ .scannerwork/report-task.txt exists"
       - name: 7. Wait for Quality Gate
         uses: sonarsource/sonarqube-quality-gate-action@master
         with:
