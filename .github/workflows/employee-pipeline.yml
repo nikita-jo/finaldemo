@@ -16,7 +16,7 @@ env:
   # differ per environment (dev / staging / prod) without code changes.
   # The fallback covers the case where Sonar runs in a Docker container
   # on the same runner.
-  SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'http://sonarqube:9000' }}
+  SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'https://sonarcloud.io' }}
   SONAR_PLUGIN_VERSION: "3.11.0.3922"
 
 jobs:
