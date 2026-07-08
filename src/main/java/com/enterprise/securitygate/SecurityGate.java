@@ -77,11 +77,6 @@ public final class SecurityGate {
         String nvidiaSummary = summarise("NVIDIA", parsed.nvidia);
 
         try {
-            Files.createDirectories(Paths.get(parsed.report).toAbsolutePath().getParent() == null
-                    ? "." : Paths.get(parsed.report).toAbsolutePath().getParent().toString());
-        } catch (IOException ignored) { /* best effort */ }
-
-        try {
             new ReportWriter().write(
                     Paths.get(parsed.report),
                     parsed.commit,
@@ -157,8 +152,9 @@ public final class SecurityGate {
         System.out.println("==============================================");
     }
 
-    private static long countBySeverity(List<Finding> findings, Severity s) {
-        return findings.stream().filter(f -> f.severity() == s).count();
+    private static int countBySeverity(List<Finding> findings, Severity s) {
+        long n = findings.stream().filter(f -> f.severity() == s).count();
+        return (int) Math.min(Integer.MAX_VALUE, n);
     }
 
     // ------------------------------------------------------------------

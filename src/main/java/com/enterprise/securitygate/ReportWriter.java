@@ -29,6 +29,10 @@ public final class ReportWriter {
                       String codeqlSummary,
                       String nvidiaSummary) throws IOException {
 
+        if (out.getParent() != null) {
+            Files.createDirectories(out.getParent());
+        }
+
         int[] codeqlCounts = decision.counts().getOrDefault(Finding.Source.CODEQL, zero());
         int[] trivyCounts  = decision.counts().getOrDefault(Finding.Source.TRIVY,  zero());
         int[] nvidiaCounts = decision.counts().getOrDefault(Finding.Source.NVIDIA, zero());
